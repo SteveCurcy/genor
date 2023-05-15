@@ -160,14 +160,16 @@ def event_handler():
             pass
 
 
+os.system('mkdir -p ../logs/')
 os.system('rm -rf extra/*')
+os.system('rm -rf logs/*')
 for cmd in cmds:
 
     t = None
     if cmd[1]:
         t = Thread(target=event_handler)
         is_running = True
-        file_path = './output/{}'.format(cmd[0].replace(' ', '_'))
+        file_path = '../logs/{}'.format(cmd[0].replace(' ', '_'))
         if os.path.isfile(file_path):
             file_path += '_cover'
         log_file = open(file_path, 'w')

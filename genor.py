@@ -7,10 +7,10 @@
 # @history
 #       <author>    <time>      <version>           <description>
 #       Xu.Cao      2023-04-17  0.0.1               创建了本文件
-#       Xu.Cao      2023-05-09  1.0.1               TODO 修改底层架构，修改分析日志的格式，图库微调
+#       Xu.Cao      2023-05-09  1.2.1               1. 修改底层架构，修改分析日志的格式，图库微调
+#                                                   2. 移除 exit_group（特殊情况除外），以其他方式到达行为结尾
 
 from graphviz import Digraph
-import pydot
 import os
 
 
@@ -61,29 +61,13 @@ def get_log_list(folder_name_: str) -> list:
     return log_list_
 
 
-# 获取指定文件中的系统调用序列，并去除重复或空行
-# @param  filename_ 要打开的文件名
-# @return 一个列表，每一个元素是一个进程的系统调用序列
-def get_syscall_lists(filename_: str) -> list:
-    with open(filename_, 'r') as f:
-        content_ = f.readlines()
-    content_ = [content_[i].split() for i in range(len(content_)) if
-                (i == 0 or content_[i] != content_[i - 1]) and content_[i].strip() != '']
-
-    syscall_lists_ = dict()
-    for item in content_:
-        if syscall_lists_.get(item[1]) is None:
-            syscall_lists_[item[1]] = list()
-        syscall_lists_[item[1]].append(item)
-
-    return list(syscall_lists_.values())
-
-
 # 规范化进程的系统调用序列，去除不合法的序列，如在没有打开 fd 的情况下 read
+# 在规范化的同时，减少连续的读写调用，这对状态机没有帮助
 # @param  syscall_list_ 进程对应的系统调用序列
 # @return 返回一个新的列表，包含没有逻辑错误的系统调用序列
 def validate_branch(syscall_list_: list) -> list:
     fd_sets_ = set()
+    is_read_, is_write_ = False, False
 
     valid_syscall_list_ = list()
     for item in syscall_list_:
@@ -95,6 +79,19 @@ def validate_branch(syscall_list_: list) -> list:
             fd_sets_.remove(item[5])
         elif item[3] == 'dup3':
             fd_sets_.add(item[6])
+
+        # 记录 read 和 write
+        if item[3] == 'read':
+            if is_read_:
+                continue
+            is_read_ = True
+        elif item[3] == 'write':
+            if is_write_:
+                continue
+            is_write_ = True
+        else:
+            # 如果都不是，那就重置标志
+            is_read_, is_write_ = False, False
 
         valid_syscall_list_.append(item)
     valid_syscall_list_ = [valid_syscall_list_[i] for i in range(len(valid_syscall_list_)) if
@@ -109,25 +106,10 @@ def validate_branch(syscall_list_: list) -> list:
 def number_the_branch(syscall_list_: list) -> list:
     syscall_id_list_ = list()
     syscall_args_sets_ = dict()
-    fd_sets_ = set()
     syscall_args_id_ = 0
 
     for line in syscall_list_:
-        if line[3] in ["openat", 'socket']:
-            syscall_args_ = "{} {}".format(line[3], line[4])
-            fd_sets_.add(line[5])
-        elif line[3] in ['unlinkat', 'renameat2']:
-            syscall_args_ = "{} {}".format(line[3], line[4])
-        elif line[3] in ['read', 'write', 'close', 'connect', 'dup3']:
-            if line[5] not in fd_sets_:
-                continue
-            if line[3] == 'close':
-                fd_sets_.remove(line[5])
-            elif line[3] == 'dup3':
-                fd_sets_.add(line[6])
-            syscall_args_ = line[3]
-        else:
-            syscall_args_ = line[3]
+        syscall_args_ = get_trigger(line)
 
         if syscall_args_ not in syscall_args_sets_:
             syscall_args_sets_.update({syscall_args_: syscall_args_id_})
@@ -139,10 +121,8 @@ def number_the_branch(syscall_list_: list) -> list:
 
 # 找到图中存在的环并返回一个合法的系统调用序列，还有如何成环的列表
 # @param  syscall_list_ 一个进程的系统调用序列
-# @return 返回一个进程合法的系统调用序列和成环的点组成的列表
-def find_loop_of_branch(syscall_list_: list) -> tuple:
-    valid_syscall_list_ = validate_branch(syscall_list_)
-
+# @return 返回一个成环的点组成的列表
+def find_loop_of_branch(valid_syscall_list_: list) -> dict:
     syscall_id_list_ = number_the_branch(valid_syscall_list_)
 
     sub_list_cnt_ = list()
@@ -176,14 +156,17 @@ def find_loop_of_branch(syscall_list_: list) -> tuple:
             go_back_.update({sub_list_cnt_[i][1]: go_back_.get(sub_list_cnt_[i][0])})
         else:
             go_back_.update({sub_list_cnt_[i][1]: sub_list_cnt_[i][0]})
-    return valid_syscall_list_, go_back_
+
+    return go_back_
 
 
-# 根据所有进程的系统调用列表和成环的保存点列表，并返回一棵最初始的状态机构成的图
+# 根据所有进程的系统调用列表和成环的保存点列表，并返回一棵最初始的状态机构成的图的数据结构
+# v1.2.1 移除 exit_group（特殊情况除外），以其他方式到达行为结尾 (Xu.Cao)
+#
 # @param  syscall_lists_ 所有进程的系统调用合法序列
 # @param  go_backs_ 当前节点应该指向的节点，从而构成环
-# @return 返回初始的状态机构成的图
-def get_tree_branch(syscall_lists_: list, go_backs_: list) -> TreeNode:
+# @return 返回初始的状态机构成的图数据结构
+def get_tree(syscall_lists_: list, go_backs_: list) -> TreeNode:
     node_id_ = 1
     tree_ = TreeNode(0)
 
@@ -195,41 +178,27 @@ def get_tree_branch(syscall_lists_: list, go_backs_: list) -> TreeNode:
 
         for j in range(len(syscall_list_)):
             line_ = syscall_list_[j]
-            if line_[3] == 'openat':
-                key_ = "openat {}".format(line_[4])
-                sys_call_args_ = line_[3] + " " + line_[4] + " " + line_[5] + " " + line_[6]
-            elif line_[3] == 'socket':
-                key_ = "socket {}".format(line_[4])
-                sys_call_args_ = '{} {} {}'.format(line_[3], line_[4], line_[5])
-            elif line_[3] in ['unlinkat', 'renameat2']:
-                key_ = "{} {}".format(line_[3], line_[4])
-                sys_call_args_ = 'unlinkat {}'.format(line_[4]) if line_[3] == 'unlinkat' else 'renameat2 {} {}'.format(
-                    line_[6], line_[7])
-            elif line_[3] in ['read', 'write', 'close', 'connect', 'dup3']:
-                sys_call_args_ = '{} {}'.format(line_[3], line_[5])
-                key_ = sys_call_args_
-            elif line_[3] == 'renameat':
-                key_ = line_[3]
-                sys_call_args_ = 'renameat {} {}'.format(line_[6], line_[7])
-            else:
-                key_ = line_[3]
-                sys_call_args_ = line_[3]
+            key_ = get_trigger(line_)
+            sys_call_args_ = get_label(line_)
 
-            edge = Edge(key_, sys_call_args_)
-            if state_.children.get(edge) is None:
-                if j == len(syscall_list_) - 1:
+            edge_ = Edge(key_, sys_call_args_)
+            if state_.children.get(edge_) is None:
+                if j == len(syscall_list_) - 1 or (
+                        j == len(syscall_list_) - 2 and syscall_list_[-1][3] == 'exit_group'):
                     leaf_ = TreeNode(node_id_)
                     node_id_ += 1
-                    state_.children.update({edge: leaf_})
+                    state_.children.update({edge_: leaf_})
                     leaf_.children = line_[2]
                     break
                 else:
                     if j in go_back_:
-                        state_.children.update({edge: save_points[go_back_[j]]})
+                        state_.children.update({edge_: save_points[go_back_[j]]})
                     else:
-                        state_.children.update({edge: TreeNode(node_id_)})
+                        state_.children.update({edge_: TreeNode(node_id_)})
                         node_id_ += 1
-            state_ = state_.children[edge]
+            state_ = state_.children[edge_]
+            if isinstance(state_.children, str):
+                break
 
             if j in go_back_.values():
                 save_points.update({j: state_})
@@ -293,25 +262,29 @@ def build_tree(g_: Digraph, tree_: TreeNode) -> None:
                 state_transition_table.append("{} {} {}".format(root_id, k.key, v.id))
 
 
+# 用于生成区分状态转移的行为字符串
+# @param event_ 一个系统调用，将系统调用和参数分割成不同字段的列表
+# @return 返回一个引起状态转移的行为操作
 def get_trigger(event_: list) -> str:
     if event_[3] in ['openat', 'socket', 'unlinkat']:
         return '{} {}'.format(event_[3], event_[4])
     if event_[3] in ['read', 'write', 'close', 'connect']:
         return '{} {}'.format(event_[3], event_[5])
-    if event_[3] in ['renameat', 'renameat2']:
-        return '{} {} {}'.format(event_[3], event_[6], event_[7])
     if event_[3] == 'mkdirat':
         return '{} {}'.format(event_[3], event_[6])
     return event_[3]
 
 
+# 用于作为边的标识，用于在图中标识状态转移的条件/操作
+# @param event_ 一个系统调用及其参数，将系统调用和参数分割成不同字段的列表
+# @return 返回该系统调用在图中的标识
 def get_label(event_: list) -> str:
     if event_[3] == 'openat':
         return '{} {} {}:({})'.format(event_[3], event_[4], event_[6], event_[5])
-    if event_[3] == 'socket':
-        return '{} {}'.format(event_[3], event_[4])
     if event_[3] in ['read', 'write', 'close', 'connect']:
         return '{} {}'.format(event_[3], event_[5])
+    if event_[3] == 'socket':
+        return '{} {}'.format(event_[3], event_[4])
     if event_[3] in ['renameat', 'renameat2']:
         return '{} {} {}'.format(event_[3], event_[6], event_[7])
     if event_[3] == 'mkdirat':
@@ -326,10 +299,12 @@ if __name__ == '__main__':
     go_backs = list()
     # for syscall_list in get_syscall_lists('fetch_log.txt'):
     for syscall_list in get_log_list('logs'):
-        s, g = find_loop_of_branch(syscall_list[:-1])
+        s = syscall_list[:-1]
+        g = find_loop_of_branch(s)
         syscall_lists.append(s)
         go_backs.append(g)
-    show_tree(get_tree_branch(syscall_lists, go_backs))
+    show_tree(get_tree(syscall_lists, go_backs))
+    print(state_transition_table)
     #
     # events = get_log_list()
     # trans_table = {}

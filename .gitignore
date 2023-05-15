@@ -1,3 +1,8 @@
+.*
+!.gitignore
+logs
+state_machine*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
