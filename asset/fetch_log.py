@@ -66,7 +66,6 @@ class BehavT(ct.Structure):
 
 # ======= end of data definition ======
 
-
 with open("fetch_log.c") as f:
     prog = f.read()
 if prog is None or prog == "":
@@ -87,7 +86,7 @@ b.attach_kprobe(event=b.get_syscall_fnname("dup3"), fn_name="syscall__dup3")
 b.attach_kprobe(event=b.get_syscall_fnname("socket"), fn_name="syscall__socket")
 b.attach_kprobe(event=b.get_syscall_fnname("connect"), fn_name="syscall__connect")
 b.attach_kprobe(event=b.get_syscall_fnname("accept"), fn_name="syscall__accept")
-b.attach_kprobe(event=b.get_syscall_fnname("exit_group"), fn_name="syscall_exit_group")
+# b.attach_kprobe(event=b.get_syscall_fnname("exit_group"), fn_name="syscall_exit_group")
 b.attach_kretprobe(event=b.get_syscall_fnname("openat"), fn_name="syscall__openat_return")
 b.attach_kretprobe(event=b.get_syscall_fnname("read"), fn_name="syscall__read_return")
 b.attach_kretprobe(event=b.get_syscall_fnname("write"), fn_name="syscall__write_return")
@@ -162,7 +161,7 @@ def event_handler():
 
 os.system('mkdir -p ../logs/')
 os.system('rm -rf extra/*')
-os.system('rm -rf logs/*')
+os.system('rm -rf ../logs/*')
 for cmd in cmds:
 
     t = None

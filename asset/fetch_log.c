@@ -62,7 +62,7 @@
 #include <bcc/proto.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
-#include "../include/ebpf_string.h"
+#include "../../include/ebpf_string.h"
 
 #define OPENAT  1
 #define SREAD    2
@@ -310,19 +310,19 @@ int syscall__accept_return(struct pt_regs *ctx) {
     return do_return(ctx);
 }
 
-int syscall_exit_group(struct pt_regs *ctx, int sig) {
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    struct behav_t *cur = state.lookup(&pid);
-
-    if (!cur) return 0;
-
-    cur->syscall = EXIT_GROUP;
-    state.delete(&pid);
-
-    behavior.ringbuf_output(cur, sizeof(struct behav_t), 0);
-
-    return 0;
-}
+//int syscall_exit_group(struct pt_regs *ctx, int sig) {
+//    u32 pid = bpf_get_current_pid_tgid() >> 32;
+//    struct behav_t *cur = state.lookup(&pid);
+//
+//    if (!cur) return 0;
+//
+//    cur->syscall = EXIT_GROUP;
+//    state.delete(&pid);
+//
+//    behavior.ringbuf_output(cur, sizeof(struct behav_t), 0);
+//
+//    return 0;
+//}
 
 /* kernel function to get inode */
 

@@ -7,8 +7,9 @@
 # @history
 #       <author>    <time>      <version>           <description>
 #       Xu.Cao      2023-04-17  0.0.1               创建了本文件
-#       Xu.Cao      2023-05-09  1.2.1               1. 修改底层架构，修改分析日志的格式，图库微调
-#                                                   2. 移除 exit_group（特殊情况除外），以其他方式到达行为结尾
+#       Xu.Cao      2023-05-09  1.2.3               1. 修改底层架构，修改分析日志的格式，图库微调
+#                                                   2. 移除 exit_group以其他方式到达行为结尾
+#                                                   3. 修改寻找环的方法，先找小环，保留所有可能的环
 
 from graphviz import Digraph
 import os
@@ -37,8 +38,9 @@ class Edge:
 # @member id 当前节点的编号
 # @member children 事件到子图的字典
 class TreeNode:
-    def __init__(self, id_: int):
-        self.id = str(id_)  # 当前节点的编号
+    def __init__(self, id_: str):
+        self.id = id_  # 当前节点的编号
+        self.is_leaf = False
         self.children = dict()  # 存储子图，事件 => 状态机子图
 
 
@@ -131,21 +133,22 @@ def find_loop_of_branch(valid_syscall_list_: list) -> dict:
     while start_ < end_:
 
         max_len_ = min(start_ + 1, len_ - start_ - 1)
-        while max_len_ >= 1:
-            left_ = syscall_id_list_[start_ - max_len_ + 1: start_ + 1]
-            right_ = syscall_id_list_[start_ + 1: start_ + max_len_ + 1]
+        try_len_ = 1
+        while try_len_ <= max_len_:
+            left_ = syscall_id_list_[start_ - try_len_ + 1: start_ + 1]
+            right_ = syscall_id_list_[start_ + 1: start_ + try_len_ + 1]
             if left_ == right_ and valid_syscall_list_[start_ + 1][3] == 'openat':
-                sub_list_cnt_.append((start_ - max_len_ + 1, start_ + 1))
+                sub_list_cnt_.append((start_ - try_len_ + 1, start_ + 1))
                 break
-            max_len_ -= 1
+            try_len_ += 1
 
         start_ += 1
 
-    # 找循环区间最大的
-    max_loop_len_ = 0
-    for i in sub_list_cnt_:
-        max_loop_len_ = max(max_loop_len_, i[1] - i[0])
-    sub_list_cnt_ = list(filter(lambda x: x[1] - x[0] == max_loop_len_, sub_list_cnt_))
+    # # 找循环区间最大的
+    # max_loop_len_ = 0
+    # for i in sub_list_cnt_:
+    #     max_loop_len_ = max(max_loop_len_, i[1] - i[0])
+    # sub_list_cnt_ = list(filter(lambda x: x[1] - x[0] == max_loop_len_, sub_list_cnt_))
 
     # 剩余的循环说明是对不同目标文件的相同操作
     go_back_ = dict()  # 用来保存跳回到哪里，即如何循环
@@ -168,7 +171,7 @@ def find_loop_of_branch(valid_syscall_list_: list) -> dict:
 # @return 返回初始的状态机构成的图数据结构
 def get_tree(syscall_lists_: list, go_backs_: list) -> TreeNode:
     node_id_ = 1
-    tree_ = TreeNode(0)
+    tree_ = TreeNode('0')
 
     for i in range(len(syscall_lists_)):
         state_ = tree_
@@ -183,9 +186,8 @@ def get_tree(syscall_lists_: list, go_backs_: list) -> TreeNode:
 
             edge_ = Edge(key_, sys_call_args_)
             if state_.children.get(edge_) is None:
-                if j == len(syscall_list_) - 1 or (
-                        j == len(syscall_list_) - 2 and syscall_list_[-1][3] == 'exit_group'):
-                    leaf_ = TreeNode(node_id_)
+                if j == len(syscall_list_) - 1:
+                    leaf_ = TreeNode(str(node_id_))
                     node_id_ += 1
                     state_.children.update({edge_: leaf_})
                     leaf_.children = line_[2]
@@ -194,7 +196,7 @@ def get_tree(syscall_lists_: list, go_backs_: list) -> TreeNode:
                     if j in go_back_:
                         state_.children.update({edge_: save_points[go_back_[j]]})
                     else:
-                        state_.children.update({edge_: TreeNode(node_id_)})
+                        state_.children.update({edge_: TreeNode(str(node_id_))})
                         node_id_ += 1
             state_ = state_.children[edge_]
             if isinstance(state_.children, str):
@@ -266,13 +268,14 @@ def build_tree(g_: Digraph, tree_: TreeNode) -> None:
 # @param event_ 一个系统调用，将系统调用和参数分割成不同字段的列表
 # @return 返回一个引起状态转移的行为操作
 def get_trigger(event_: list) -> str:
-    if event_[3] in ['openat', 'socket', 'unlinkat']:
-        return '{} {}'.format(event_[3], event_[4])
-    if event_[3] in ['read', 'write', 'close', 'connect']:
-        return '{} {}'.format(event_[3], event_[5])
-    if event_[3] == 'mkdirat':
-        return '{} {}'.format(event_[3], event_[6])
-    return event_[3]
+    # if event_[3] in ['openat', 'socket', 'unlinkat']:
+    #     return '{} {}'.format(event_[3], event_[4])
+    # if event_[3] in ['read', 'write', 'close', 'connect']:
+    #     return '{} {}'.format(event_[3], event_[5])
+    # if event_[3] == 'mkdirat':
+    #     return '{} {}'.format(event_[3], event_[6])
+    # return event_[3]
+    return event_[3] + ' ' + event_[4]
 
 
 # 用于作为边的标识，用于在图中标识状态转移的条件/操作
