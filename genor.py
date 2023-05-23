@@ -10,9 +10,11 @@
 #       Xu.Cao      2023-05-09  1.2.3               1. 修改底层架构，修改分析日志的格式，图库微调
 #                                                   2. 移除 exit_group以其他方式到达行为结尾
 #                                                   3. 修改寻找环的方法，先找小环，保留所有可能的环
+#       Xu.Cao      2023-05-23  1.2.6               修复了部分成图之后的问题
 
 from graphviz import Digraph
 import os
+from typing import List, Tuple
 
 
 # 用于表示一条边的信息，保存了一个用于区分不同边的 key 和实际命令 command
@@ -40,13 +42,14 @@ class Edge:
 class TreeNode:
     def __init__(self, id_: str):
         self.id = id_  # 当前节点的编号
+        self.parent = None
         self.is_leaf = False
         self.children = dict()  # 存储子图，事件 => 状态机子图
 
 
 # 获取日志文件中的系统调用序列
 # @return 一个列表，每一个元素都是一个进程的系统调用序列
-def get_log_list(folder_name_: str) -> list:
+def get_log_list(folder_name_: str) -> List[Tuple[list, str]]:
     log_list_ = []
     file_list_ = [file_ for file_ in os.listdir(folder_name_) if os.path.isfile(os.path.join(folder_name_, file_))]
     for file_ in file_list_:
@@ -58,8 +61,7 @@ def get_log_list(folder_name_: str) -> list:
                     (i == 0 or content_[i] != content_[i - 1]) and content_[i].strip() != ''
                     and content_[i].split()[2] == cmd_.split()[0]]
         content_ = validate_branch(content_)
-        content_.append(cmd_)
-        log_list_.append(content_)
+        log_list_.append((content_, cmd_))
     return log_list_
 
 
@@ -169,14 +171,12 @@ def find_loop_of_branch(valid_syscall_list_: list) -> dict:
 # @param  syscall_lists_ 所有进程的系统调用合法序列
 # @param  go_backs_ 当前节点应该指向的节点，从而构成环
 # @return 返回初始的状态机构成的图数据结构
-def get_tree(syscall_lists_: list, go_backs_: list) -> TreeNode:
+def get_tree(syscall_lists_: List[Tuple[list, dict, str]]) -> TreeNode:
     node_id_ = 1
     tree_ = TreeNode('0')
 
-    for i in range(len(syscall_lists_)):
+    for syscall_list_, go_back_, cmd_ in syscall_lists_:
         state_ = tree_
-        syscall_list_ = syscall_lists_[i]
-        go_back_ = go_backs_[i]
         save_points = dict()
 
         for j in range(len(syscall_list_)):
@@ -188,15 +188,23 @@ def get_tree(syscall_lists_: list, go_backs_: list) -> TreeNode:
             if state_.children.get(edge_) is None:
                 if j == len(syscall_list_) - 1:
                     leaf_ = TreeNode(str(node_id_))
+                    leaf_.children[True] = cmd_
+                    leaf_.parent = state_
+                    leaf_.is_leaf = True
+                    state_.is_leaf = False
                     node_id_ += 1
                     state_.children.update({edge_: leaf_})
-                    leaf_.children = line_[2]
                     break
                 else:
                     if j in go_back_:
                         state_.children.update({edge_: save_points[go_back_[j]]})
                     else:
-                        state_.children.update({edge_: TreeNode(str(node_id_))})
+                        new_node = TreeNode(str(node_id_))
+                        state_.children.update({edge_: new_node})
+                        new_node.children[True] = cmd_
+                        new_node.parent = state_
+                        new_node.is_leaf = True
+                        state_.is_leaf = False
                         node_id_ += 1
             state_ = state_.children[edge_]
             if isinstance(state_.children, str):
@@ -248,20 +256,20 @@ def build_tree(g_: Digraph, tree_: TreeNode) -> None:
 
     root_id = tree_.id
     for k, v in tree_.children.items():
-        if isinstance(v.children, str):
-            g_.node(v.id, v.children)
-            g_.edge(root_id, v.id, k.command)
-            state_transition_table.append("{} {} {}".format(root_id, k.key, v.children))
-        else:
-            if id(v) not in vis:
-                g_.node(v.id, v.id)
-                g_.edge(root_id, v.id, k.command)
-                vis.add(id(v))
-                build_tree(g_, v)
-                state_transition_table.append("{} {} {}".format(root_id, k.key, v.id))
+        if k is True:
+            continue
+        if id(v) not in vis:
+            if v.is_leaf is True:
+                g_.node(v.id, v.children[True])
             else:
-                g_.edge(root_id, v.id, k.command)
-                state_transition_table.append("{} {} {}".format(root_id, k.key, v.id))
+                g_.node(v.id, v.id)
+            g_.edge(root_id, v.id, k.command)
+            vis.add(id(v))
+            build_tree(g_, v)
+            state_transition_table.append("{} {} {}".format(root_id, k.key, v.id))
+        else:
+            g_.edge(root_id, v.id, k.command)
+            state_transition_table.append("{} {} {}".format(root_id, k.key, v.id))
 
 
 # 用于生成区分状态转移的行为字符串
@@ -299,14 +307,11 @@ def get_label(event_: list) -> str:
 
 if __name__ == '__main__':
     syscall_lists = list()
-    go_backs = list()
     # for syscall_list in get_syscall_lists('fetch_log.txt'):
-    for syscall_list in get_log_list('logs'):
-        s = syscall_list[:-1]
-        g = find_loop_of_branch(s)
-        syscall_lists.append(s)
-        go_backs.append(g)
-    show_tree(get_tree(syscall_lists, go_backs))
+    for syscall_list, cmd in get_log_list('logs'):
+        g = find_loop_of_branch(syscall_list)
+        syscall_lists.append((syscall_list, g, cmd))
+    show_tree(get_tree(syscall_lists))
     print(state_transition_table)
     #
     # events = get_log_list()
