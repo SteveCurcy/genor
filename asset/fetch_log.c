@@ -1,57 +1,12 @@
 /*
- * @date    2023-03-03.
- * @version v0.0.1
+ * @date    2023-03-03
  * @author  Xu.Cao
  * @details 本程序主要用于返回每个关注的行为的系统调用序列，以单个进程为单位，目的是查看每个进程的行为，多进程的关联不属于本程序的任务
  *
- * @functions:
- *      __always_inline static int do_entry(struct pt_regs *ctx, u64 call_args, int fd0, int fd1, u64 net_info, u8 flag)
- *      __always_inline static int do_return(struct pt_regs *ctx)
- *      @details
- *          do_entry is to receive some essential arguments of syscalls and fill the next possible state.
- *          do_return will update the state if return-value is valid. besides, it will submit the state infos (log)
- *              by the state transition table.
- *
- *      int syscall__openat(struct pt_regs *ctx, int dirfd, const char __user *name, int FLAG)
- *      int syscall__openat_return(struct pt_regs *ctx)
- *      int syscall__read(struct pt_regs *ctx, int fd)
- *      int syscall__read_return(struct pt_regs *ctx)
- *      int syscall__write(struct pt_regs *ctx, int fd)
- *      int syscall__write_return(struct pt_regs *ctx)
- *      int syscall__close(struct pt_regs *ctx, int fd)
- *      int syscall__close_return(struct pt_regs *ctx)
- *      int syscall__unlinkat(struct pt_regs *ctx, int dirfd, const char __user *name, int FLAG)
- *      int syscall__unlinkat_return(struct pt_regs *ctx)
- *      int syscall__mkdirat(struct pt_regs *ctx, int dirfd, const char __user *name)
- *      int syscall__mkdirat_return(struct pt_regs *ctx)
- *      int syscall__renameat(struct pt_regs *ctx, int olddir, const char *oldname, int newdir, const char *newname)
- *      int syscall__renameat_return(struct pt_regs *ctx)
- *      int syscall__renameat2(struct pt_regs *ctx, int olddir, const char *oldname, int newdir, const char *newname, unsigned int FLAG)
- *      int syscall__renameat2_return(struct pt_regs *ctx)
- *      int syscall__dup3(struct pt_regs *ctx, int oldfd, int newfd, int FLAG)
- *      int syscall__dup3_return(struct pt_regs *ctx)
- *      int syscall__socket(struct pt_regs *ctx, int family, int type, int protocol)
- *      int syscall__socket_return(struct pt_regs *ctx)
- *      int syscall__connect(struct pt_regs *ctx, int fd, const struct sockaddr __user* addr, u32 addrlen)
- *      int syscall__connect_return(struct pt_regs *ctx)
- *      int syscall__accept(struct pt_regs *ctx, int sockfd, struct sockaddr __user* addr)
- *      int syscall__accept_return(struct pt_regs *ctx)
- *      int syscall_exit_group(struct pt_regs *ctx, int sig)
- *      @details
- *          All `syscall__*` functions will be injected to trace the related syscall's context and maintain the state.
- *          Specially, syscall__exit_group is the exit point of a task, so will destruct the state struct.
- *
- *      int do_vfs_open(struct pt_regs *ctx, const struct path *path, struct file *file)
- *      int do_vfs_unlink(struct pt_regs *ctx, struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, struct inode **delegated_inode)
- *      int do_vfs_rename(struct pt_regs *ctx, struct renamedata *rd)
- *      int do_vfs_mkdir(struct pt_regs *ctx, struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry, umode_t mode)
- *      int do_vfs_mkdir_return(struct pt_regs *ctx)
- *      int do_vfs_rmdir(struct pt_regs *ctx, struct user_namespace *mnt_userns, struct inode *dir, struct dentry *dentry)
- *      @details
- *          All `do_vfs_*` functions will be injected to trace deeper kernel functions and get file names and inodes, etc.
  * @history
- *      <author>    <time>      <version>                       <description>
- *      Xu.Cao      2023-03-07  6.0.5.230307_alpha_a1_Xu.C     Format this code
+ *      <author>    <time>      <version>               <description>
+ *      Xu.Cao      2023-03-07  1.0.1                   Format this code
+ *      Xu.Cao      2023-05-22  1.2.6                   support for vfs_rename, etc.
  */
 #include <uapi/linux/ptrace.h>
 #include <linux/dcache.h>
@@ -62,21 +17,26 @@
 #include <bcc/proto.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
-#include "../../include/ebpf_string.h"
+#include "ebpf_string.h"
 
-#define OPENAT  1
-#define SREAD    2
-#define SWRITE   3
-#define CLOSE   4
-#define UNLINKAT 5
-#define MKDIRAT 6
-#define RENAMEAT 7
-#define RENAMEAT2 8
-#define DUP3    9
-#define SOCKET  10
-#define CONNECT 11
-#define ACCEPT  12
-#define EXIT_GROUP 13
+#define SYS_CALL_OPENAT 0x00
+#define SYS_CALL_DUP3 0x01
+#define SYS_CALL_RENAMEAT 0x02
+#define SYS_CALL_RENAMEAT2 0x03
+#define SYS_CALL_READ 0x04
+#define SYS_CALL_WRITE 0x05
+#define SYS_CALL_CLOSE 0x06
+#define SYS_CALL_UNLINKAT 0x07
+#define SYS_CALL_MKDIRAT 0x08
+#define SYS_CALL_EXIT_GROUP 0x09
+#define SYS_CALL_SOCKET 0x0a
+#define SYS_CALL_CONNECT 0x0b
+#define SYS_CALL_RENAME 0x0c
+#define SYS_CALL_DUP2 0x0d
+#define SYS_CALL_MKDIR 0x0e
+#define SYS_CALL_RMDIR 0x0f
+#define SYS_CALL_UNLINK 0x10
+#define SYS_CALL_ACCEPT 0x11
 
 struct behav_t {
     u32 ppid, pid;
@@ -95,7 +55,7 @@ struct behav_t {
 
 BPF_HASH(state, u32, struct behav_t, 4096);
 BPF_HASH(cur_sock, u32, struct sock *, 32);
-BPF_RINGBUF_OUTPUT(behavior, 8);
+BPF_PERF_OUTPUT(behavior);
 
 #define NET_ARG(family, type) (((u64)family << 32) | protocol)
 
@@ -132,10 +92,10 @@ static int do_entry(struct pt_regs *ctx, u8 syscall, u64 flags, bool type,
     }
 
     // 除非上一条系统调用与当前这一条相同，否则都重新填充数据，减少不必要的冗余，因为他们语义上只代表该进程做了这样的事
-    if (cur->old_syscall == syscall && (syscall == SREAD || syscall == SWRITE)) {
+    if (cur->old_syscall == syscall && (syscall == SYS_CALL_READ || syscall == SYS_CALL_WRITE)) {
         cur->is_output = false;
         return 0;
-    } if (syscall == OPENAT && flags == 0x80000) {
+    } if (syscall == SYS_CALL_OPENAT && flags == 0x80000) {
         cur->is_output = false;
         return 0;
     } else {
@@ -144,12 +104,7 @@ static int do_entry(struct pt_regs *ctx, u8 syscall, u64 flags, bool type,
 //    bpf_get_current_comm(&(cur->comm), 32);
     bpf_probe_read_kernel_str(cur->comm, 32, task->comm);
 
-    if (ebpf_strcmp("cat", cur->comm) && ebpf_strcmp("touch", cur->comm) && ebpf_strcmp("vi", cur->comm) &&
-        ebpf_strcmp("vim", cur->comm) && ebpf_strcmp("rm", cur->comm) && ebpf_strcmp("split", cur->comm) &&
-        ebpf_strcmp("zip", cur->comm) && ebpf_strcmp("gzip", cur->comm) && ebpf_strcmp("unzip", cur->comm) &&
-        ebpf_strcmp("cp", cur->comm) && ebpf_strcmp("mv", cur->comm) && ebpf_strcmp("mkdir", cur->comm) &&
-        ebpf_strcmp("rmdir", cur->comm) && ebpf_strcmp("ssh", cur->comm) && ebpf_strcmp("sshd", cur->comm) &&
-        ebpf_strcmp("scp", cur->comm)) {
+    if ([FILTER]) {
         return 0;
     }
 
@@ -179,7 +134,7 @@ static int do_return(struct pt_regs *ctx) {
         return 0;
     }
 
-    if (cur->syscall != ACCEPT) {
+    if (cur->syscall != SYS_CALL_ACCEPT) {
         int ret_val = PT_REGS_RC(ctx);
 
         /* skip if no state recording or returning error */
@@ -192,7 +147,7 @@ static int do_return(struct pt_regs *ctx) {
         }
     }
 
-    if (cur->syscall == CLOSE) {
+    if (cur->syscall == SYS_CALL_CLOSE) {
         bpf_probe_read_user_str(cur->filename, sizeof(cur->filename), NULL);
         bpf_probe_read_user_str(cur->secondary_filename, sizeof(cur->secondary_filename), NULL);
     }
@@ -201,13 +156,13 @@ static int do_return(struct pt_regs *ctx) {
         return 0;
     }
 
-    behavior.ringbuf_output(cur, sizeof(struct behav_t), 0);
+    behavior.perf_submit(ctx, cur, sizeof(struct behav_t));
 
     return 0;
 }
 
 int syscall__openat(struct pt_regs *ctx, int dirfd, const char __user *name, int FLAG) {
-    return do_entry(ctx, OPENAT, FLAG, false, -1, -1, name, NULL);
+    return do_entry(ctx, SYS_CALL_OPENAT, FLAG, false, -1, -1, name, NULL);
 }
 
 int syscall__openat_return(struct pt_regs *ctx) {
@@ -215,7 +170,7 @@ int syscall__openat_return(struct pt_regs *ctx) {
 }
 
 int syscall__read(struct pt_regs *ctx, int fd) {
-    return do_entry(ctx, SREAD, 0, false, fd, -1, NULL, NULL);
+    return do_entry(ctx, SYS_CALL_READ, 0, false, fd, -1, NULL, NULL);
 }
 
 int syscall__read_return(struct pt_regs *ctx) {
@@ -223,7 +178,7 @@ int syscall__read_return(struct pt_regs *ctx) {
 }
 
 int syscall__write(struct pt_regs *ctx, int fd) {
-    return do_entry(ctx, SWRITE, 0, false, fd, -1, NULL, NULL);
+    return do_entry(ctx, SYS_CALL_WRITE, 0, false, fd, -1, NULL, NULL);
 }
 
 int syscall__write_return(struct pt_regs *ctx) {
@@ -231,33 +186,66 @@ int syscall__write_return(struct pt_regs *ctx) {
 }
 
 int syscall__close(struct pt_regs *ctx, int fd) {
-    return do_entry(ctx, CLOSE, 0, false, fd, -1, NULL, NULL);
+    return do_entry(ctx, SYS_CALL_CLOSE, 0, false, fd, -1, NULL, NULL);
 }
 
 int syscall__close_return(struct pt_regs *ctx) {
     return do_return(ctx);
 }
 
+int syscall__unlink(struct pt_regs *ctx, const char __user *name) {
+    return do_entry(ctx, SYS_CALL_UNLINK, 0, false, -1, -1, name, NULL);
+}
+
+int syscall__unlink_return(struct pt_regs *ctx) {
+    return do_return(ctx);
+}
+
 int syscall__unlinkat(struct pt_regs *ctx, int dirfd, const char __user *name, int FLAG) {
-return do_entry(ctx, UNLINKAT, FLAG, false, -1, -1, name, NULL);
+return do_entry(ctx, SYS_CALL_UNLINKAT, FLAG, false, -1, -1, name, NULL);
 }
 
 int syscall__unlinkat_return(struct pt_regs *ctx) {
     return do_return(ctx);
 }
 
+int syscall__mkdir(struct pt_regs *ctx, const char __user *name) {
+    return do_entry(ctx, SYS_CALL_MKDIR, 0, false, -1, -1, name, NULL);
+}
+
+int syscall__mkdir_return(struct pt_regs *ctx) {
+    return do_return(ctx);
+}
+
 int syscall__mkdirat(struct pt_regs *ctx, int dirfd, const char __user *name) {
-return do_entry(ctx, MKDIRAT, 0, false, -1, -1, name, NULL);
+return do_entry(ctx, SYS_CALL_MKDIRAT, 0, false, -1, -1, name, NULL);
 }
 
 int syscall__mkdirat_return(struct pt_regs *ctx) {
     return do_return(ctx);
 }
 
+int syscall__rmdir(struct pt_regs *ctx, const char __user *name) {
+    return do_entry(ctx, SYS_CALL_RMDIR, 0, false, -1, -1, name, NULL);
+}
+
+int syscall__rmdir_return(struct pt_regs *ctx, const char __user *name) {
+    return do_return(ctx);
+}
+
+int syscall__rename(struct pt_regs *ctx, const char __user *oldname,
+                    const char __user *newname) {
+    return do_entry(ctx, SYS_CALL_RENAME, 0, false, -1, -1, oldname, newname);
+}
+
+int syscall__rename_return(struct pt_regs *ctx) {
+    return do_return(ctx);
+}
+
 int syscall__renameat(struct pt_regs *ctx,
                       int olddir, const char __user *oldname,
                       int newdir, const char __user *newname) {
-    return do_entry(ctx, RENAMEAT, 0, false, -1, -1, oldname, newname);
+    return do_entry(ctx, SYS_CALL_RENAMEAT, 0, false, -1, -1, oldname, newname);
 }
 
 int syscall__renameat_return(struct pt_regs *ctx) {
@@ -268,15 +256,23 @@ int syscall__renameat2(struct pt_regs *ctx,
                        int olddir, const char *oldname,
                        int newdir, const char *newname,
                        unsigned int FLAG) {
-    return do_entry(ctx, RENAMEAT2, FLAG, false, -1, -1, oldname, newname);
+    return do_entry(ctx, SYS_CALL_RENAMEAT2, FLAG, false, -1, -1, oldname, newname);
 }
 
 int syscall__renameat2_return(struct pt_regs *ctx) {
     return do_return(ctx);
 }
 
+int syscall__dup2(struct pt_regs *ctx, int oldfd, int newfd) {
+    return do_entry(ctx, SYS_CALL_DUP2, 0, false, oldfd, newfd, NULL, NULL);
+}
+
+int syscall__dup2_return(struct pt_regs *ctx) {
+    return do_return(ctx);
+}
+
 int syscall__dup3(struct pt_regs *ctx, int oldfd, int newfd, int FLAG) {
-    return do_entry(ctx, DUP3, FLAG, false, oldfd, newfd, NULL, NULL);
+    return do_entry(ctx, SYS_CALL_DUP3, FLAG, false, oldfd, newfd, NULL, NULL);
 }
 
 int syscall__dup3_return(struct pt_regs *ctx) {
@@ -285,7 +281,7 @@ int syscall__dup3_return(struct pt_regs *ctx) {
 
 int syscall__socket(struct pt_regs *ctx,
                     int family, int type, int protocol) {
-    return do_entry(ctx, SOCKET, NET_ARG(family, type), true, -1, -1, NULL, NULL);
+    return do_entry(ctx, SYS_CALL_SOCKET, NET_ARG(family, type), true, -1, -1, NULL, NULL);
 }
 
 int syscall__socket_return(struct pt_regs *ctx) {
@@ -294,7 +290,7 @@ int syscall__socket_return(struct pt_regs *ctx) {
 
 int syscall__connect(struct pt_regs *ctx, int fd,
                      const struct sockaddr __user* addr, u32 addrlen) {
-    return do_entry(ctx, CONNECT, 0, true, fd, -1, NULL, NULL);
+    return do_entry(ctx, SYS_CALL_CONNECT, 0, true, fd, -1, NULL, NULL);
 }
 
 int syscall__connect_return(struct pt_regs *ctx) {
@@ -303,7 +299,7 @@ int syscall__connect_return(struct pt_regs *ctx) {
 
 // accept is listened by sshd as daemon, so should put it into state machine
 int syscall__accept(struct pt_regs *ctx, int sockfd, struct sockaddr __user* addr) {
-    return do_entry(ctx, ACCEPT, 0, true, sockfd, -1, NULL, NULL);
+    return do_entry(ctx, SYS_CALL_ACCEPT, 0, true, sockfd, -1, NULL, NULL);
 }
 
 int syscall__accept_return(struct pt_regs *ctx) {
